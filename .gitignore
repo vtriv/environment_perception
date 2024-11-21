@@ -1,0 +1,14 @@
+# Ignore all .MOV, .mov, and .mp4 files
+*.MOV
+*.mov
+*.mp4
+*.pdf
+
+# Ignore the "unimportant" folder
+unimportant/
+
+*.pdf
+
+yolov3-openimages.weights
+yolov3-openimages.cfg
+openimages.names
