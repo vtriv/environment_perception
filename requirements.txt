@@ -1,0 +1,6 @@
+opencv-python
+numpy
+scipy
+matplotlib
+
+# depth pro (pip install --only-binary pillow_heif -e .)

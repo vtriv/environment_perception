@@ -2,7 +2,10 @@ import cv2
 import numpy as np
 from typing import List, Tuple, Optional
 from scipy.spatial import distance
-import open3d as o3d
+# import open3d as o3d
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import depth_pro
 
 class Environment:
     def __init__(self, video_path: str):
@@ -18,6 +21,7 @@ class Environment:
         self.objects = []  # List of detected objects
         self.keypoints = []  # Keypoints for spatial mapping (SLAM)
         self.dimensions = {}  # Object/location dimensions
+        self.point_cloud = []
 
         self.net = cv2.dnn.readNet("yolov3-openimages.cfg", "yolov3-openimages.weights")
         with open("openimages.names", "r") as f:
@@ -45,28 +49,51 @@ class Environment:
         frame_count = 0
         n = round(self.fps / 15)
 
+        ret, prev_frame = cap.read()
+        # Convert first frame to grayscale
+        prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+
+        # point_cloud = []
+
         while cap.isOpened():
-            ret, frame = cap.read()
+            ret, curr_frame = cap.read()
             if not ret:
                 break
             
-            frame_count += 1
+            if frame_count < 1000:
+                # Convert current frame to grayscale
+                curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
 
-            if frame_count % n == 0:
-                # Add frame processing logic here (e.g., object detection, SLAM)
-                self._process_frame(frame)
-                self.frames.append(frame)
-                out.write(frame)
-                print("len frames: ", len(self.frames))  # Placeholder: Display frame count 
-                print("frame count: ", frame_count)
-                print("num objects: ", len(self.objects))
-                # print(len(self.keypoints))
-                print('---')
+                # Match features and estimate pose
+                points1, points2, _, _ = self._match_features(prev_gray, curr_gray)
+                # Update for next iteration
+                prev_gray = curr_gray
+                
+                R, t = self._estimate_pose(points1, points2)
+                if R is None or t is None:
+                    print("Skipping frame due to invalid pose estimation.")
+                    continue  # Skip the current frame
+                # Triangulate points
+                points_3d = self._triangulate_points(points1, points2, R, t)
+                self.point_cloud.append(points_3d)
+
+                frame_count += 1
+
+                if frame_count % n == 0 and frame_count < self.total_frames/3:
+                    # Add frame processing logic here (e.g., object detection, SLAM)
+                    self._process_frame(curr_frame)
+                    self.frames.append(curr_frame)
+                    out.write(curr_frame)
+                    print("len frames: ", len(self.frames))  # Placeholder: Display frame count 
+                    print("frame count: ", frame_count)
+                    print("num objects: ", len(self.objects))
+                    print('---')
 
         cap.release()
         out.release()
         cv2.destroyAllWindows()
-        self._generate_map()
+        # self._generate_map()
+        self._visualize_point_cloud()
 
     def _process_frame(self, frame):
         """
@@ -92,7 +119,7 @@ class Environment:
                 class_id = np.argmax(scores)  # Get the class ID with the highest score
                 confidence = scores[class_id]  # Confidence of the best class
 
-                if confidence > 0.3:  # Confidence threshold
+                if confidence > 0.25:  # Confidence threshold
                     # Scale bounding box to original frame size
                     center_x = int(detection[0] * width)
                     center_y = int(detection[1] * height)
@@ -119,73 +146,96 @@ class Environment:
                                 (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
         
-        # self.objects.extend(detected_objects)
-        self._update_tracked_objects(detected_objects)
+        self.objects.extend(detected_objects)
 
-        # preprocessing
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        # extract keypoints
+    def _match_features(self, frame1, frame2):
+        """
+        Match ORB features between two frames.
+
+        Args:
+            frame1 (np.ndarray): First frame.
+            frame2 (np.ndarray): Second frame.
+
+        Returns:
+            Tuple[List[cv2.KeyPoint], List[cv2.KeyPoint], np.ndarray, np.ndarray]: 
+            Keypoints and descriptors for both frames.
+        """
         orb = cv2.ORB_create()
-        keypoints, descriptors = orb.detectAndCompute(gray, None)
-        if keypoints:
-            self.keypoints.append((keypoints, descriptors))
+        keypoints1, descriptors1 = orb.detectAndCompute(frame1, None)
+        keypoints2, descriptors2 = orb.detectAndCompute(frame2, None)
 
-        # # Update spatial map after processing the frame
-        # map_width = 800
-        # map_height = 600
-        # spatial_map = np.zeros((map_height, map_width, 3), dtype=np.uint8)
+        matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        matches = matcher.match(descriptors1, descriptors2)
+        matches = sorted(matches, key=lambda x: x.distance)
 
-        # for obj in self.tracked_objects:
-        #     x, y, w, h = obj["bbox"]
-        #     label = obj["label"]
+        points1 = np.float32([keypoints1[m.queryIdx].pt for m in matches])
+        points2 = np.float32([keypoints2[m.trainIdx].pt for m in matches])
 
-        #     center_x = int((x + w / 2) / frame.shape[1] * map_width)
-        #     center_y = int((y + h / 2) / frame.shape[0] * map_height)
+        return points1, points2, keypoints1, keypoints2
 
-        #     cv2.circle(spatial_map, (center_x, center_y), 5, (0, 0, 255), -1)
-        #     cv2.putText(spatial_map, label, (center_x, center_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+    def _estimate_pose(self, points1, points2):
+        """
+        Estimate pose between two frames using the essential matrix.
 
-        # # Display spatial map dynamically
-        # cv2.imshow("Spatial Map", spatial_map)
-        # cv2.waitKey(1)  # Adjust delay as needed for smoother updates
+        Args:
+            points1 (np.ndarray): Matched keypoints from the first frame.
+            points2 (np.ndarray): Matched keypoints from the second frame.
 
-        # # # Optionally save the map periodically (e.g., every 10 frames)
-        # # if len(self.frames) % 10 == 0:
-        # #     cv2.imwrite(f"spatial_map_frame_{len(self.frames)}.png", spatial_map)
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: Rotation and translation matrices.
+        """
+        camera_matrix = np.array([[800, 0, 320], [0, 800, 240], [0, 0, 1]])
 
-        # # Update class attribute
-        # self.map_representation = spatial_map
+        # Compute essential matrix
+        E, mask = cv2.findEssentialMat(points1, points2, camera_matrix, method=cv2.RANSAC, prob=0.999, threshold=1.0)
 
-    # def _update_tracked_objects(self, detected_objects):
-    #     """
-    #     Update the list of tracked objects with the latest detections.
+        # Validate essential matrix
+        if E is None or E.shape != (3, 3):
+            print("Invalid essential matrix:", E)
+            return None, None
 
-    #     Args:
-    #         detected_objects (List[Dict]): List of detected objects in the current frame.
-    #     """
-    #     if not hasattr(self, "tracked_objects"):
-    #         self.tracked_objects = []
-        
-    #     updated_tracked_objects = []
+        # Filter inliers
+        inliers1 = points1[mask.ravel() == 1]
+        inliers2 = points2[mask.ravel() == 1]
 
-    #     for detected in detected_objects:
-    #         matched = False
-    #         for tracked in self.tracked_objects:
-    #             # Compare by label and spatial proximity
-    #             if (tracked["label"] == detected["label"] and distance.euclidian(tracked["center"], detected["center"]) < 50):
-    #                 tracked["center"] = detected["center"]
-    #                 tracked["bbox"] = detected["bbox"]
-    #                 tracked["confidence"] = max(tracked["confidence"], detected["confidence"])
-    #                 updated_tracked_objects.append(detected)
-    #                 matched = True
-    #                 break
+        if len(inliers1) < 8:
+            print("Not enough inliers for pose estimation.")
+            return None, None
 
-    #             if not matched:
-    #                 detected["id"] = len(self.tracked_objects) + 1
-    #                 updated_tracked_objects.append(detected)
-            
-    #     self.tracked_objects = updated_tracked_objects
-    #     self.objects = self.tracked_objects
+        # Recover pose
+        _, R, t, _ = cv2.recoverPose(E, inliers1, inliers2, camera_matrix)
+        return R, t
+
+    
+    def _triangulate_points(self, points1, points2, R, t):
+        """
+        Triangulate 3D points from matched 2D points and pose.
+
+        Args:
+            points1 (np.ndarray): Matched keypoints from the first frame.
+            points2 (np.ndarray): Matched keypoints from the second frame.
+            R (np.ndarray): Rotation matrix.
+            t (np.ndarray): Translation vector.
+
+        Returns:
+            np.ndarray: 3D points.
+        """
+        # Placeholder camera matrix
+        camera_matrix = np.array([[800, 0, 320], [0, 800, 240], [0, 0, 1]])
+
+        # Projection matrices
+        proj_matrix1 = np.hstack((np.eye(3), np.zeros((3, 1))))
+        proj_matrix2 = np.hstack((R, t))
+
+        # Convert to projection matrices in pixel space
+        proj_matrix1 = camera_matrix @ proj_matrix1
+        proj_matrix2 = camera_matrix @ proj_matrix2
+
+        points_4d = cv2.triangulatePoints(proj_matrix1, proj_matrix2, points1.T, points2.T)
+        points_3d = points_4d[:3] / points_4d[3]  # Convert homogeneous to 3D
+        return points_3d.T
+
+
 
     def _generate_map(self):
         """
@@ -194,6 +244,11 @@ class Environment:
         if len(self.keypoints) < 2:
             print("Not enough frames with keypoints for 3D mapping.")
             return
+
+        fx = 26
+        fy = fx
+        cx = 0
+        cy = 0
 
         # Placeholder: Camera matrix (intrinsic parameters)
         camera_matrix = np.array([[fx, 0, cx],
@@ -264,17 +319,27 @@ class Environment:
 
         # self.map_representation = spatial_map
 
-    def _visualize_point_cloud(self, points):
+    def _visualize_point_cloud(self):
         """
         Visualize the 3D point cloud using Open3D.
 
         Args:
             points (np.ndarray): Array of 3D points.
         """
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points)
-
-        o3d.visualization.draw_geometries([pcd])
+        points = np.vstack(self.point_cloud)
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+        
+        x = points[:, 0]
+        y = points[:, 1]
+        z = points[:, 2]
+        
+        ax.scatter(x, y, z, c='b', marker='o', s=1)
+        
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+        plt.show()
 
     def get_map(self) -> str:
         """
@@ -284,6 +349,15 @@ class Environment:
             str: Placeholder map representation.
         """
         return self.map_representation
+
+    def get_keypoints(self) -> List[Tuple]:
+        """
+        Get the keypoints extracted from the video frames.
+
+        Returns:
+            List[Tuple]: List of keypoints and descriptors.
+        """
+        return self.keypoints
 
     def get_objects(self) -> List[str]:
         """

@@ -12,3 +12,6 @@ unimportant/
 yolov3-openimages.weights
 yolov3-openimages.cfg
 openimages.names
+
+__pycache__/
+ml-depth-pro/
