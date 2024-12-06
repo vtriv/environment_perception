@@ -60,39 +60,44 @@ class Environment:
             if not ret:
                 break
             
-            if frame_count < 1000:
-                # Convert current frame to grayscale
-                curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
+            # Convert current frame to grayscale
+            curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
 
-                # Match features and estimate pose
-                points1, points2, _, _ = self._match_features(prev_gray, curr_gray)
-                # Update for next iteration
-                prev_gray = curr_gray
-                
-                R, t = self._estimate_pose(points1, points2)
-                if R is None or t is None:
-                    print("Skipping frame due to invalid pose estimation.")
-                    continue  # Skip the current frame
-                # Triangulate points
-                points_3d = self._triangulate_points(points1, points2, R, t)
-                self.point_cloud.append(points_3d)
+            # Match features and estimate pose
+            points1, points2, _, _ = self._match_features(prev_gray, curr_gray)
 
-                frame_count += 1
+            # Update for next iteration
+            prev_gray = curr_gray
 
-                if frame_count % n == 0 and frame_count < self.total_frames/3:
-                    # Add frame processing logic here (e.g., object detection, SLAM)
-                    self._process_frame(curr_frame)
-                    self.frames.append(curr_frame)
-                    out.write(curr_frame)
-                    print("len frames: ", len(self.frames))  # Placeholder: Display frame count 
-                    print("frame count: ", frame_count)
-                    print("num objects: ", len(self.objects))
-                    print('---')
+            if points1 is None or points2 is None:
+                print("Skipping frame due to invalid feature matching.")
+                continue
+
+            R, t = self._estimate_pose(points1, points2)
+            if R is None or t is None:
+                print("Skipping frame due to invalid pose estimation.")
+                continue  # Skip the current frame
+            # Triangulate points
+            points_3d = self._triangulate_points(points1, points2, R, t)
+            self.point_cloud.append(points_3d)
+
+            frame_count += 1
+
+            if frame_count % n == 0 and frame_count < self.total_frames/3:
+                # Add frame processing logic here (e.g., object detection, SLAM)
+                self._process_frame(curr_frame)
+                self.frames.append(curr_frame)
+                out.write(curr_frame)
+                print("len frames: ", len(self.frames))  # Placeholder: Display frame count 
+                print("frame count: ", frame_count)
+                print("num objects: ", len(self.objects))
+                print('---')
 
         cap.release()
         out.release()
         cv2.destroyAllWindows()
         # self._generate_map()
+        print("Processing complete. Visualizing Point Cloud...")
         self._visualize_point_cloud()
 
     def _process_frame(self, frame):
@@ -164,6 +169,12 @@ class Environment:
         keypoints1, descriptors1 = orb.detectAndCompute(frame1, None)
         keypoints2, descriptors2 = orb.detectAndCompute(frame2, None)
 
+        if descriptors1 is None or descriptors2 is None:
+            print("No descriptors found.")
+            return None, None, None, None
+        
+        # print("Shape of descriptors: ", descriptors1.shape, descriptors2.shape)
+
         matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
         matches = matcher.match(descriptors1, descriptors2)
         matches = sorted(matches, key=lambda x: x.distance)
@@ -184,7 +195,7 @@ class Environment:
         Returns:
             Tuple[np.ndarray, np.ndarray]: Rotation and translation matrices.
         """
-        camera_matrix = np.array([[800, 0, 320], [0, 800, 240], [0, 0, 1]])
+        camera_matrix = np.array([[800, 0, 320], [0, 800, 240], [0, 0, 1]]) # Placeholder camera matrix
 
         # Compute essential matrix
         E, mask = cv2.findEssentialMat(points1, points2, camera_matrix, method=cv2.RANSAC, prob=0.999, threshold=1.0)

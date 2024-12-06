@@ -13,5 +13,7 @@ yolov3-openimages.weights
 yolov3-openimages.cfg
 openimages.names
 
+point_cloud.npy
+
 __pycache__/
 ml-depth-pro/
