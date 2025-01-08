@@ -10,8 +10,8 @@ unimportant/
 *.pdf
 
 # yolov3-openimages.weights
-# yolov3-openimages.cfg
-# openimages.names
+yolov3-openimages.cfg
+openimages.names
 
 point_cloud.npy
 
